@@ -1,14 +1,12 @@
 let s:HASH = sha256(expand('<sfile>:p'))
 
-
 function! lista#filter#start(context) abort
+  let a:context.cursor = line('.')
   let bufnr = bufnr('%')
   let bufhidden = &bufhidden
   let &bufhidden = 'hide'
-  execute printf(
-        \ 'keepalt keepjumps edit %s',
-        \ fnameescape('lista://' . expand('%:p')),
-        \)
+  execute 'keepalt keepjumps edit' fnameescape(bufname)
+  let bufname = printf('lista://%s', bufname('%'))
   execute printf('cnoremap <silent><buffer> <Plug>(lista-accept) %s<CR>', s:HASH)
   cnoremap <silent><buffer><expr> <Plug>(lista-prev-line) <SID>move_to_prev_line()
   cnoremap <silent><buffer><expr> <Plug>(lista-next-line) <SID>move_to_next_line()
@@ -20,82 +18,76 @@ function! lista#filter#start(context) abort
   setlocal filetype=lista
 
   let b:context = a:context
-  call s:update()
-  try
-    call timer_start(
-        \ b:context.interval,
-        \ funcref('s:consumer'),
+  let timer = timer_start(
+        \ a:context.interval,
+        \ funcref('s:timer_callback', [bufnr('%')]),
+        \ { 'repeat': -1 },
         \)
+  try
+    call s:print_content(a:context.indices, a:context.content)
+    call cursor(a:context.cursor, 1, 0)
+    redraw
     return (input(a:context.prompt, a:context.query)[-64:] ==# s:HASH)
   finally
+    call timer_stop(timer)
     execute 'keepalt keepjumps buffer' bufnr
     let &bufhidden = bufhidden
     redraw
   endtry
 endfunction
 
-function! s:consumer(...) abort
-  if getcmdtype() !=# '@'
-    return
-  elseif getcmdline() !=# b:context.query
-    call s:update()
-  endif
-  call timer_start(
-       \ b:context.interval,
-       \ funcref('s:consumer'),
-       \)
-endfunction
-
-function! s:update(...) abort
-  let query = getcmdline()
-  let ignorecase = b:context.ignorecase
-  let matcher = b:context.matchers[b:context.matcher]
-  let content = b:context.content
-  let pattern = matcher.pattern(query, ignorecase)
-  let indices = matcher.filter(content, query, ignorecase)
-  let b:context.query = query
-  let b:context.indices = indices
-  let b:context.cursor = max([min([b:context.cursor, len(indices)]), 1])
-  call s:update_statusline(b:context)
-  redrawstatus
-  call s:update_content(content, indices, b:context.number)
-  call s:update_hlsearch(pattern, ignorecase)
-  call cursor(b:context.cursor, 1, 0)
-  redraw
-endfunction
-
-function! s:update_content(content, indices, number) abort
+function! s:print_content(indices, content) abort
   if empty(a:indices)
-    silent! keepjumps %delete _
+    silent keepjumps %delete _
     return
   endif
-  if a:number
-    let digit = len(len(a:content) . '')
-    let format = printf('%%%dd %%s', digit)
-    let content = map(
-          \ copy(a:indices),
-          \ 'printf(format, v:val + 1, a:content[v:val])'
-          \)
-  else
-    let content = map(copy(a:indices), 'a:content[v:val]')
-  endif
-  silent! call setline(1, content)
+  let digit = len(len(a:content) . '')
+  let format = printf('%%%dd %%s', digit)
+  let content = map(
+        \ copy(a:indices),
+        \ { _, v -> printf(format, v + 1, a:content[v]) },
+        \)
+  call setline(1, content)
   execute printf('silent! keepjumps %d,$delete _', len(a:indices) + 1)
 endfunction
 
-function! s:update_hlsearch(pattern, ignorecase) abort
-  if empty(a:pattern)
+function! s:timer_callback(bufnr, ...) abort
+  if getcmdtype() !=# '@' || a:bufnr isnot# bufnr('%')
+    return
+  endif
+  let query = getcmdline()
+  if query ==# b:context.query
+    return
+  endif
+  let ignorecase = b:context.ignorecase
+  let matcher = b:context.matchers[b:context.matcher]
+  let content = b:context.content
+  let pattern = matcher.get_pattern(query, ignorecase)
+  let indices = matcher.get_indices(content, query, ignorecase)
+  " Update content
+  call s:print_content(indices, content)
+  " Update highlight
+  if empty(pattern)
     silent nohlsearch
   else
     silent! execute printf(
           \ '/%s\%%(%s\)/',
-          \ a:ignorecase ? '\c' : '\C',
-          \ a:pattern
+          \ ignorecase ? '\c' : '\C',
+          \ pattern
           \)
   endif
+  " Update context
+  let b:context.query = query
+  let b:context.indices = indices
+  let b:context.cursor = max([min([b:context.cursor, len(indices)]), 1])
+  " Update statusline
+  let &l:statusline = s:statusline()
+  " Update cursor and redraw
+  call cursor(b:context.cursor, 1, 0)
+  redraw
 endfunction
 
-function! s:update_statusline(context) abort
+function! s:statusline() abort
   let statusline = [
         \ '%%#ListaStatuslineFile# %s ',
         \ '%%#ListaStatuslineMiddle#%%=',
@@ -103,13 +95,13 @@ function! s:update_statusline(context) abort
         \ '%%#ListaStatuslineMatcher# Case: %s (C-_ to switch) ',
         \ '%%#ListaStatuslineIndicator# %d/%d',
         \]
-  let &l:statusline = printf(
+  return printf(
         \ join(statusline, ''),
         \ expand('%'),
-        \ a:context.matchers[a:context.matcher].name,
-        \ a:context.ignorecase ? 'ignore' : 'normal',
-        \ len(a:context.indices),
-        \ len(a:context.content),
+        \ b:context.matchers[b:context.matcher].name,
+        \ b:context.ignorecase ? 'ignore' : 'normal',
+        \ len(b:context.indices),
+        \ len(b:context.content),
         \)
 endfunction
 
@@ -146,7 +138,8 @@ function! s:switch_to_prev_matcher() abort
   else
     let b:context.matcher -= 1
   endif
-  call timer_start(0, funcref('s:update'))
+  let &l:statusline = s:statusline()
+  redrawstatus
   call feedkeys(" \<C-h>", 'n')   " Stay TERM cursor on cmdline
   return ''
 endfunction
@@ -158,14 +151,16 @@ function! s:switch_to_next_matcher() abort
   else
     let b:context.matcher += 1
   endif
-  call timer_start(0, funcref('s:update'))
+  let &l:statusline = s:statusline()
+  redrawstatus
   call feedkeys(" \<C-h>", 'n')   " Stay TERM cursor on cmdline
   return ''
 endfunction
 
 function! s:switch_ignorecase() abort
   let b:context.ignorecase = !b:context.ignorecase
-  call timer_start(0, funcref('s:update'))
+  let &l:statusline = s:statusline()
+  redrawstatus
   call feedkeys(" \<C-h>", 'n')   " Stay TERM cursor on cmdline
   return ''
 endfunction
