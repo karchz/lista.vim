@@ -10,3 +10,5 @@ setlocal nolist nowrap nospell nofoldenable nonumber
 cmap <buffer> <CR>  <Plug>(lista-accept)
 cmap <buffer> <C-k> <Plug>(lista-prev-line)
 cmap <buffer> <C-j> <Plug>(lista-next-line)
+cmap <buffer> <Up> <Plug>(lista-prev-line)
+cmap <buffer> <Down> <Plug>(lista-next-line)
